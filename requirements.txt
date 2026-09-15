@@ -1,0 +1,11 @@
+--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+
+llama-cpp-python[server]
+openai
+pydantic
+huggingface_hub
+sentence-transformers
+numpy
+mcp<2
+jupyter
+ipykernel
