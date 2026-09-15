@@ -6,6 +6,7 @@ no system binary or install script needed (Colab-friendly).
 """
 import atexit
 import os
+import shutil
 import signal
 import subprocess
 import time
@@ -31,8 +32,37 @@ def download_model(local_dir="models"):
     return path
 
 
-def start_llama_server(model_path=None, n_ctx=4096):
-    """Starts `python -m llama_cpp.server` in the background and waits until it responds."""
+def gpu_available() -> bool:
+    """
+    True if `nvidia-smi` runs successfully, i.e. an NVIDIA GPU + driver is present.
+
+    Note this only tells you a GPU *exists* on the machine -- it does NOT mean
+    llama-cpp-python can actually use it. That also requires having installed a
+    CUDA-enabled wheel (e.g. `--extra-index-url
+    https://abetlen.github.io/llama-cpp-python/whl/cu121`, matched to your CUDA
+    version) instead of this repo's default CPU-only wheel. Passing
+    n_gpu_layers=-1 to start_llama_server() on the CPU-only wheel is harmless
+    but does nothing -- there's no GPU code compiled in to use.
+    """
+    if shutil.which("nvidia-smi") is None:
+        return False
+    try:
+        return subprocess.run(["nvidia-smi"], capture_output=True, timeout=10).returncode == 0
+    except Exception:
+        return False
+
+
+def start_llama_server(model_path=None, n_ctx=4096, n_gpu_layers=0):
+    """Starts `python -m llama_cpp.server` in the background and waits until it responds.
+
+    n_gpu_layers: how many model layers to offload to GPU. -1 = all layers,
+        0 = CPU-only (the default, matching this repo's default CPU-only wheel
+        install so it keeps working out of the box on a plain Colab CPU
+        runtime). If you've installed a CUDA-enabled llama-cpp-python wheel and
+        have a GPU, pass -1 explicitly -- or use the gpu_available() helper
+        above to decide at call time, e.g.:
+            start_llama_server(model_path, n_gpu_layers=-1 if gpu_available() else 0)
+    """
     global SERVER_PROCESS
 
     if model_path is None:
@@ -43,11 +73,25 @@ def start_llama_server(model_path=None, n_ctx=4096):
 
     log_file = "llama_server.log"
     print("Starting llama.cpp server...")
+    print(f"n_gpu_layers={n_gpu_layers} ({'GPU offload' if n_gpu_layers != 0 else 'CPU-only'})")
+
+    # llama_cpp.server checks a CONFIG_FILE env var *before* --config_file (see its
+    # __main__.py: `os.environ.get("CONFIG_FILE", args.config_file)`) and tries to
+    # JSON-parse whatever it points to as its own server config. On JupyterHub/Open
+    # OnDemand setups (e.g. Anvil), the notebook launcher itself sets CONFIG_FILE to
+    # its own jupyter_notebook_config.py -- unrelated to llama.cpp, but the name
+    # collides, and llama.cpp's server crashes trying to parse that Python file as
+    # JSON ("Invalid JSON: expected value..."). Strip it from this subprocess's
+    # environment so it can't interfere.
+    env = os.environ.copy()
+    env.pop("CONFIG_FILE", None)
+
     process = subprocess.Popen(
         [
             "python3", "-m", "llama_cpp.server",
             "--model", model_path,
             "--n_ctx", str(n_ctx),
+            "--n_gpu_layers", str(n_gpu_layers),
             "--n_threads", "-1",
             "--chat_format", "chatml-function-calling",
             "--host", HOST,
@@ -56,6 +100,7 @@ def start_llama_server(model_path=None, n_ctx=4096):
         stdout=open(log_file, "w"),
         stderr=subprocess.STDOUT,
         preexec_fn=os.setpgrp,
+        env=env,
     )
     SERVER_PROCESS = process
     print(f"Logs: {log_file}")
